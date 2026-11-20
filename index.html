@@ -129,6 +129,16 @@
   <div class="log" id="log"></div>
 </details>
 
+<div class="card">
+  <div class="label">Diagnostics</div>
+  <div class="mini">Can’t find the monitor? Tap <b>Run diagnostics</b> (takes ~15 s), then <b>Copy report</b> and paste it to Claude.</div>
+  <div class="row" style="margin-top:10px">
+    <button class="ghost" id="diag">Run diagnostics</button>
+    <button class="ghost" id="diagCopy">Copy report</button>
+  </div>
+  <textarea id="diagOut" readonly style="width:100%;height:180px;margin-top:10px;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:10px;font:11px ui-monospace,Menlo,monospace;padding:8px"></textarea>
+</div>
+
 <div class="mini" style="text-align:center;margin:4px 0 10px">
   Monitor not in the list? Close the Battery Master app first. <a href="#" id="showAll">Show all devices</a> · <a href="#" id="forget">Forget my monitor</a>
 </div>
@@ -209,8 +219,8 @@ async function connect(){
     // 2) otherwise ask; the BT2000 advertises service FFF0 and the name "BatteryMaster"
     if(!dev){
       dev=await navigator.bluetooth.requestDevice(showAll?
-        {acceptAllDevices:true,optionalServices:[SVC,SVC_ALT]}:
-        {filters:[{services:[SVC]},{name:'BatteryMaster'},{namePrefix:'Battery'}],optionalServices:[SVC,SVC_ALT]});
+        {acceptAllDevices:true,optionalServices:[SVC]}:
+        {filters:[{services:[SVC]},{name:'BatteryMaster'},{namePrefix:'Battery'}],optionalServices:[SVC]});
     }
     showAll=false;
     device=dev;
@@ -233,14 +243,35 @@ async function connect(){
     log('ERROR '+msg);
   }
 }
+// FFF3 only advertises "write with response"; iOS silently drops other writes, so use that first
 async function writeBlock(block){
   const enc=encBlock(block);
-  try{await writeCh.writeValueWithoutResponse(enc);}
-  catch(e){await writeCh.writeValueWithResponse(enc);}
+  try{await writeCh.writeValueWithResponse(enc);return 'ok';}
+  catch(e){
+    try{await writeCh.writeValueWithoutResponse(enc);return 'ok (no-response mode)';}
+    catch(e2){return 'FAILED '+errText(e2);}
+  }
 }
+let frames=0,readings=0,watchdog=null;
 async function doHandshake(){
-  for(const f of HANDSHAKE){await writeBlock(f);await sleep(180);}
-  log('handshake sent');
+  frames=0;readings=0;
+  for(let i=0;i<HANDSHAKE.length;i++){
+    const f=HANDSHAKE[i];
+    setStatus('Handshake '+(i+1)+'/'+HANDSHAKE.length+'…','wait');
+    const r=await writeBlock(f);
+    log('sent cmd '+f[2].toString(16).padStart(2,'0')+' → '+r);
+    await sleep(250);
+  }
+  setStatus('Connected · waiting for first reading…','wait');
+  $('pill').textContent='Waiting for first reading…';
+  clearTimeout(watchdog);
+  watchdog=setTimeout(()=>{
+    if(readings===0){
+      const msg=frames?('Device answered ('+frames+' frames) but sent no voltage yet'):'Connected, but the monitor is not answering';
+      setStatus(msg,'');log('NO DATA after 8 s — '+msg);
+      $('pill').textContent='No data from monitor';
+    }
+  },8000);
 }
 function errText(e){
   if(e==null)return 'unknown error';
@@ -285,11 +316,14 @@ function onData(ev){
   const raw=new Uint8Array(ev.target.value.buffer);
   if(raw.length<16)return;
   const pt=decBlock(raw.slice(0,16));
+  frames++;
   log(hex(pt));
   if(pt[0]!==0xf1||pt[1]!==0x55)return;
   if(pt[2]===0x07&&pt[3]===0x01){
     const v=((pt[4]<<8)|pt[5])/100;        // voltage, big-endian, hundredths
     const t=pt[9];                          // tentative temperature byte
+    readings++;
+    setStatus('Live · '+readings+' reading'+(readings===1?'':'s')+' received','on');
     pushReading(v,t);
   }
 }
@@ -416,6 +450,58 @@ function exportCsv(){
 /* ---------- wire up ---------- */
 $('connect').onclick=connect;
 $('disconnect').onclick=disconnect;
+/* ---------- diagnostics ---------- */
+async function runDiag(){
+  const out=[];const p=s=>{out.push(s);$('diagOut').value=out.join('\n');};
+  const bt=navigator.bluetooth;
+  p('time '+new Date().toISOString());
+  p('ua '+navigator.userAgent);
+  p('page '+location.href);
+  p('bluetooth api: '+(!!bt));
+  if(!bt){p('STOP: no Web Bluetooth in this browser');return;}
+  p('api: getAvailability='+!!bt.getAvailability+' getDevices='+!!bt.getDevices+' requestLEScan='+!!bt.requestLEScan);
+  try{p('adapter available: '+(bt.getAvailability?await bt.getAvailability():'n/a'));}catch(e){p('availability error: '+errText(e));}
+  p('saved monitor id: '+(localStorage.getItem('bt2000_dev')||'none'));
+  p('current connection: '+(gatt&&gatt.connected?'CONNECTED':'none'));
+  if(bt.getDevices){
+    try{const ds=await bt.getDevices();p('remembered devices: '+ds.length);
+      ds.forEach(d=>p('  - '+(d.name||'(no name)')+' id='+d.id+' connected='+(d.gatt&&d.gatt.connected)));}
+    catch(e){p('getDevices error: '+errText(e));}
+  }
+  if(bt.requestLEScan){
+    p('scanning 12 s… (keep the phone near the battery)');
+    const seen=new Map();
+    const h=ev=>{const k=ev.device.id;const r=seen.get(k)||{name:'',uuids:new Set(),rssi:-999,n:0,mfg:''};
+      r.name=ev.name||ev.device.name||r.name;(ev.uuids||[]).forEach(u=>r.uuids.add(u));r.rssi=Math.max(r.rssi,ev.rssi??-999);r.n++;
+      try{if(ev.manufacturerData&&ev.manufacturerData.size){r.mfg=[...ev.manufacturerData.keys()].map(x=>'0x'+x.toString(16)).join(',');}}catch(e){}
+      seen.set(k,r);};
+    let scan;
+    try{
+      bt.addEventListener('advertisementreceived',h);
+      scan=await bt.requestLEScan({acceptAllAdvertisements:true,keepRepeatedDevices:true});
+      await sleep(12000);
+    }catch(e){p('scan error: '+errText(e));}
+    try{scan&&scan.stop();}catch(e){}
+    bt.removeEventListener('advertisementreceived',h);
+    const rows=[...seen.entries()].sort((a,b)=>b[1].rssi-a[1].rssi);
+    p('devices heard: '+rows.length);
+    let hit=false;
+    rows.forEach(([id,r])=>{const us=[...r.uuids].map(u=>u.replace('-0000-1000-8000-00805f9b34fb','').replace(/^0000/,''));
+      const m=/battery/i.test(r.name)||us.some(u=>/fff0/i.test(u));if(m)hit=true;
+      p((m?'>> ':'   ')+(r.name||'(no name)')+' rssi='+r.rssi+' uuids=['+us.join(',')+']'+(r.mfg?' mfg='+r.mfg:'')+' id='+id.slice(0,8));});
+    p(hit?'RESULT: monitor IS advertising — picker should find it':'RESULT: monitor NOT advertising — something else is connected to it');
+  }else{
+    p('this Bluefy version has no scan API; trying the picker with the monitor filter…');
+    try{const d=await bt.requestDevice({filters:[{services:[SVC]},{name:'BatteryMaster'},{namePrefix:'Battery'}],optionalServices:[SVC]});
+      p('picker returned: '+(d.name||'(no name)')+' id='+d.id);}catch(e){p('picker: '+errText(e));}
+  }
+  p('--- end ---');
+}
+$('diag').onclick=()=>runDiag().catch(e=>{$('diagOut').value+='\nfatal '+errText(e);});
+$('diagCopy').onclick=async()=>{const t=$('diagOut');t.select();
+  try{await navigator.clipboard.writeText(t.value);$('diagCopy').textContent='Copied ✓';}
+  catch(e){document.execCommand&&document.execCommand('copy');$('diagCopy').textContent='Copied (select-all fallback)';}
+  setTimeout(()=>$('diagCopy').textContent='Copy report',2500);};
 $('showAll').onclick=e=>{e.preventDefault();showAll=true;connect();};
 $('forget').onclick=e=>{e.preventDefault();try{localStorage.removeItem('bt2000_dev')}catch(_){}device=null;setStatus('Monitor forgotten — tap Connect to pick again','');};
 $('csv').onclick=exportCsv;
