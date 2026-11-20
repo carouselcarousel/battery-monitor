@@ -334,7 +334,7 @@ function draw(){
   // right axis: charge %
   ctx.fillStyle='#36d399';for(const p of[0,50,100]){ctx.fillText(p+'%',L+pw+4,ys(p)+3);}
   // lines (break the line across gaps > 10 min, so missing periods don't look like data)
-  const gap=range==='live'?30e3:10*60e3;
+  const gap=range==='live'?30e3:Math.max(15*60e3,span/200); // break only on real gaps, not on thinning
   const line=(col,fy,w)=>{ctx.beginPath();ctx.strokeStyle=col;ctx.lineWidth=w;let prev=null;
     for(const d of data){const xx=x(d.t),yy=fy(d);if(!prev||d.t-prev>gap)ctx.moveTo(xx,yy);else ctx.lineTo(xx,yy);prev=d.t;}ctx.stroke();};
   line('rgba(54,211,153,.85)',d=>ys(socFromV(d.v)),1.5);
