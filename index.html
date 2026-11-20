@@ -278,6 +278,7 @@ function syncProgress(pct,txt){
 function finishSync(reason){
   if(!syncing)return;
   syncing=false;clearTimeout(syncIdle);
+  window.__hist={len:histHex.length,head:histHex.slice(0,800),tail:histHex.slice(-240),reason};
   let added=0;
   const end=histHex.indexOf('FFFEFE');
   if(end>=0||histHex.length){
@@ -560,11 +561,19 @@ async function runDiag(){
       const m=/battery/i.test(r.name)||us.some(u=>/fff0/i.test(u));if(m)hit=true;
       p((m?'>> ':'   ')+(r.name||'(no name)')+' rssi='+r.rssi+' uuids=['+us.join(',')+']'+(r.mfg?' mfg='+r.mfg:'')+' id='+id.slice(0,8));});
     p(hit?'RESULT: monitor IS advertising — picker should find it':'RESULT: monitor NOT advertising — something else is connected to it');
+  }else if(gatt&&gatt.connected){
+    p('no scan API; skipping picker test because the monitor is already connected');
   }else{
     p('this Bluefy version has no scan API; trying the picker with the monitor filter…');
     try{const d=await bt.requestDevice({filters:[{services:[SVC]},{name:'BatteryMaster'},{namePrefix:'Battery'}],optionalServices:[SVC]});
       p('picker returned: '+(d.name||'(no name)')+' id='+d.id);}catch(e){p('picker: '+errText(e));}
   }
+  const h=window.__hist;
+  p('frames='+(typeof frames!=='undefined'?frames:'?')+' live readings='+(typeof readings!=='undefined'?readings:'?'));
+  if(h){p('history hex length '+h.len+' ('+h.reason+')');p('history head: '+h.head);p('history tail: '+h.tail);}
+  else p('history: none captured yet');
+  p('recent log (newest first):');
+  $('log').textContent.split('\n').slice(0,60).forEach(l=>p('  '+l));
   p('--- end ---');
 }
 $('diag').onclick=()=>runDiag().catch(e=>{$('diagOut').value+='\nfatal '+errText(e);});
