@@ -258,7 +258,7 @@ async function writeBlock(block){
     catch(e2){return 'FAILED '+errText(e2);}
   }
 }
-let frames=0,readings=0,watchdog=null;
+let frames=0,readings=0,watchdog=null,devSoc=null;
 /* history download state (protocol taken from the official app):
    cmd 09 asks for N two-minute records; the monitor streams 4-byte records, newest first,
    ending with FFFEFE (or FEFEFE when it has nothing). */
@@ -390,11 +390,13 @@ function onData(ev){
   }
   log(hex(pt));
   if(!isCmd)return;
-  if(pt[2]===0x07&&pt[3]===0x01){
+  // live frame: F15507 + anything except FF (FF = ack). byte3 is a state flag (01 at rest, 00 seen while charging)
+  if(pt[2]===0x07&&pt[3]!==0xff){
     const v=((pt[4]<<8)|pt[5])/100;        // voltage, big-endian, hundredths
     const t=pt[8]?-pt[9]:pt[9];             // temperature °C (confirmed against stored history records)
     readings++;
     setStatus('Live · '+readings+' reading'+(readings===1?'':'s')+' received','on');
+    devSoc=Math.min(pt[7],100);
     pushReading(v,t);
   }
 }
@@ -424,7 +426,7 @@ function socFromV(v){
 function render(v,tempByte){
   $('volt').innerHTML=v.toFixed(2)+'<small>V</small>';
   const soc=socFromV(v);
-  $('soc').textContent='Charge ≈ '+soc+'% (at rest)';
+  $('soc').textContent=devSoc!=null?('Charge '+devSoc+'% (monitor) · ≈'+soc+'% from voltage'):('Charge ≈ '+soc+'% (at rest)');
   let col=v>=12.4?'var(--good)':v>=12.0?'var(--warn)':'var(--bad)';
   let txt=v>=12.4?'Healthy':v>=12.0?'Low — charge soon':'Very low';
   const p=$('pill');p.textContent=txt;p.style.background=col;p.style.color='#0b0f17';
