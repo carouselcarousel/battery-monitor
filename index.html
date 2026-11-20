@@ -35,7 +35,15 @@
   .metric{background:var(--panel2);border-radius:14px;padding:14px}
   .metric .k{color:var(--muted);font-size:12px}
   .metric .v{font-size:22px;font-weight:700;margin-top:3px}
-  canvas{width:100%;height:160px;display:block}
+  canvas{width:100%;height:200px;display:block}
+  .seg{display:flex;gap:4px;background:var(--panel2);border-radius:12px;padding:4px;margin-bottom:10px}
+  .seg button{flex:1;background:transparent;color:var(--muted);padding:8px 4px;font-size:13px;border-radius:9px}
+  .seg button.on{background:var(--accent);color:#0b0f17}
+  table.wk{width:100%;border-collapse:collapse;font-size:13px}
+  table.wk th{color:var(--muted);font-weight:500;text-align:right;padding:6px 4px;border-bottom:1px solid var(--line)}
+  table.wk th:first-child,table.wk td:first-child{text-align:left}
+  table.wk td{text-align:right;padding:7px 4px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+  table.wk tr:last-child td{border-bottom:none}
   .row{display:flex;gap:8px;flex-wrap:wrap}
   .row>button{flex:1;min-width:120px}
   .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
@@ -78,12 +86,24 @@
 </div>
 
 <div class="card">
-  <div class="label">Voltage history</div>
-  <canvas id="chart"></canvas>
-  <div class="row" style="margin-top:10px">
-    <button class="ghost" id="range1">Live</button>
-    <button class="ghost" id="rangeAll">All stored</button>
+  <div class="label">History — <span style="color:var(--accent)">voltage</span> &amp; <span style="color:var(--good)">charge %</span></div>
+  <div class="seg" id="seg">
+    <button data-r="live">Live</button>
+    <button data-r="day">24 h</button>
+    <button data-r="week" class="on">7 days</button>
+    <button data-r="month">30 days</button>
   </div>
+  <canvas id="chart"></canvas>
+  <div class="mini" id="chartNote" style="margin-top:6px"></div>
+</div>
+
+<div class="card">
+  <div class="label">Last 7 days</div>
+  <table class="wk" id="week">
+    <thead><tr><th>Day</th><th>Min V</th><th>Avg V</th><th>Max V</th><th>Avg charge</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="mini" style="margin-top:8px">Readings are recorded while this page is connected. Days with no readings show “—”.</div>
 </div>
 
 <div class="card">
@@ -158,25 +178,31 @@ const HANDSHAKE=[frame(0x05),frame(0x08,[0x00,0xd1,0x04,0x02,0x1c]),frame(0x09,[
 
 /* ---------- state ---------- */
 let gatt=null,writeCh=null,notifyCh=null;
-let history=load();         // [{t, v}]
+let history=load();         // per-minute points [{t, v, mn, mx, n}]
 let live=[];                // recent in-memory points for the Live view
-let rangeAll=false;
-let lastBeep=0;
+let range='week';
+const KEEP_MS=31*24*3600e3; // keep ~a month of per-minute points (~45k max, ~2 MB)
+let lastBeep=0,lastSave=0;
 
 const $=id=>document.getElementById(id);
 function setStatus(txt,cls){$('status').textContent=txt;$('dot').className='dot'+(cls?' '+cls:'');}
 
 /* ---------- storage ---------- */
-function load(){try{return JSON.parse(localStorage.getItem('bt2000_hist')||'[]')}catch(e){return[]}}
-function save(){try{localStorage.setItem('bt2000_hist',JSON.stringify(history.slice(-20000)))}catch(e){}}
+function load(){try{return JSON.parse(localStorage.getItem('bt2000_hist2')||'[]')}catch(e){return[]}}
+function save(){
+  const cut=Date.now()-KEEP_MS;
+  while(history.length&&history[0].t<cut)history.shift();
+  try{localStorage.setItem('bt2000_hist2',JSON.stringify(history))}catch(e){}
+}
 
 /* ---------- connect ---------- */
 async function connect(){
   if(!navigator.bluetooth){$('unsupported').classList.remove('hide');return;}
   try{
     setStatus('Requesting device…','wait');
+    // the BT2000 advertises no name and no service UUID, so list every nearby device
     const dev=await navigator.bluetooth.requestDevice({
-      filters:[{services:[SVC]},{namePrefix:'BT'},{namePrefix:'NSX'},{namePrefix:'Battery'}],
+      acceptAllDevices:true,
       optionalServices:[SVC,SVC_ALT]
     });
     dev.addEventListener('gattserverdisconnected',onDisconnect);
@@ -191,8 +217,9 @@ async function connect(){
     $('connect').classList.add('hide');$('disconnect').classList.remove('hide');
     await doHandshake();
   }catch(e){
-    setStatus('Failed: '+(e.message||e),'');
-    log('ERROR '+(e.message||e));
+    const msg=errText(e);
+    setStatus('Failed: '+msg,'');
+    log('ERROR '+msg);
   }
 }
 async function writeBlock(block){
@@ -203,6 +230,11 @@ async function writeBlock(block){
 async function doHandshake(){
   for(const f of HANDSHAKE){await writeBlock(f);await sleep(180);}
   log('handshake sent');
+}
+function errText(e){
+  if(e==null)return 'unknown error';
+  if(typeof e!=='object')return 'code '+e+(e===2?' (no device chosen / not found)':'');
+  return (e.name?e.name+': ':'')+(e.message||JSON.stringify(e));
 }
 function onDisconnect(){setStatus('Disconnected','');$('connect').classList.remove('hide');$('disconnect').classList.add('hide');}
 function disconnect(){if(gatt&&gatt.connected)gatt.disconnect();onDisconnect();}
@@ -223,9 +255,16 @@ function onData(ev){
 function pushReading(v,tempByte){
   const now=Date.now();
   live.push({t:now,v});if(live.length>600)live.shift();
-  // store at most one point / 5 s to keep history compact
+  // aggregate into one point per minute (average, plus min/max to keep dips visible)
+  const minute=Math.floor(now/60000)*60000;
   const last=history[history.length-1];
-  if(!last||now-last.t>=5000){history.push({t:now,v});save();}
+  if(last&&last.t===minute){
+    last.v=+((last.v*last.n+v)/(last.n+1)).toFixed(3);last.n++;
+    if(v<last.mn)last.mn=v;if(v>last.mx)last.mx=v;
+  }else{
+    history.push({t:minute,v,mn:v,mx:v,n:1});save();
+  }
+  if(now-lastSave>30000){save();lastSave=now;}
   render(v,tempByte);
 }
 
@@ -250,23 +289,73 @@ function render(v,tempByte){
   const th=parseFloat($('alarm').value);
   if(v<th){$('alarmState').textContent='⚠ below '+th+' V';$('alarmState').style.color='var(--bad)';beep();}
   else{$('alarmState').textContent='ok';$('alarmState').style.color='var(--muted)';}
-  $('stats').textContent=history.length+' readings stored · oldest '+(history.length?new Date(history[0].t).toLocaleString():'—');
+  updateStats();
   draw();
+}
+function updateStats(){
+  $('stats').textContent=history.length?(history.length+' minutes recorded · since '+new Date(history[0].t).toLocaleString()):'No readings stored yet.';
+  renderWeek();
 }
 function draw(){
   const c=$('chart'),ctx=c.getContext('2d'),dpr=devicePixelRatio||1;
   const W=c.clientWidth,H=c.clientHeight;c.width=W*dpr;c.height=H*dpr;ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
-  const data=rangeAll?history:live;
-  if(data.length<2){ctx.fillStyle='#8aa0bd';ctx.font='13px sans-serif';ctx.fillText('Waiting for readings…',10,H/2);return;}
-  const vs=data.map(d=>d.v),min=Math.min(...vs)-0.1,max=Math.max(...vs)+0.1;
-  const x=i=>10+i/(data.length-1)*(W-20),y=val=>H-10-(val-min)/(max-min||1)*(H-24);
-  // gridlines
-  ctx.strokeStyle='#2a3647';ctx.lineWidth=1;ctx.fillStyle='#8aa0bd';ctx.font='10px sans-serif';
-  for(let g=0;g<=2;g++){const vv=min+(max-min)*g/2,yy=y(vv);ctx.beginPath();ctx.moveTo(10,yy);ctx.lineTo(W-10,yy);ctx.stroke();ctx.fillText(vv.toFixed(2),W-42,yy-2);}
-  ctx.beginPath();ctx.strokeStyle='#4cc2ff';ctx.lineWidth=2;
-  data.forEach((d,i)=>{const xx=x(i),yy=y(d.v);i?ctx.lineTo(xx,yy):ctx.moveTo(xx,yy);});
-  ctx.stroke();
+  const now=Date.now();
+  const span={live:null,day:24*3600e3,week:7*24*3600e3,month:30*24*3600e3}[range];
+  let data,t0,t1;
+  if(range==='live'){data=live;t0=data.length?data[0].t:now-60e3;t1=now;}
+  else{t1=now;t0=now-span;data=history.filter(d=>d.t>=t0);
+    // thin out for drawing: at most ~600 buckets, keeping the lowest dip in each
+    const step=span/600;if(data.length>600){const b=new Map();for(const d of data){const k=Math.floor((d.t-t0)/step);
+      const e=b.get(k);if(!e)b.set(k,{t:d.t,v:d.v,mn:d.mn??d.v,s:d.v,n:1});else{e.s+=d.v;e.n++;e.v=e.s/e.n;e.mn=Math.min(e.mn,d.mn??d.v);}}
+      data=[...b.values()];}}
+  const L=36,R=34,T=8,B=22,pw=W-L-R,ph=H-T-B;
+  const note=$('chartNote');
+  if(data.length<2){ctx.fillStyle='#8aa0bd';ctx.font='13px sans-serif';
+    ctx.fillText(range==='live'?'Connect to see live readings':'No readings in this period yet',L,H/2);
+    note.textContent='';return;}
+  const vs=data.map(d=>d.v),vmin=Math.min(...data.map(d=>d.mn??d.v))-0.05,vmax=Math.max(...vs)+0.05;
+  const x=t=>L+(t-t0)/(t1-t0||1)*pw;
+  const yv=v=>T+ph-(v-vmin)/(vmax-vmin||1)*ph;
+  const ys=p=>T+ph-p/100*ph;
+  ctx.font='10px sans-serif';ctx.lineWidth=1;
+  // day separators + labels for multi-day views
+  if(range==='week'||range==='month'||range==='day'){
+    const d0=new Date(t0);d0.setHours(0,0,0,0);
+    for(let d=d0.getTime();d<=t1;d+=24*3600e3){if(d<t0)continue;const xx=x(d);
+      ctx.strokeStyle='#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
+      if(range!=='month'||new Date(d).getDate()%5===1){ctx.fillStyle='#8aa0bd';
+        ctx.fillText(new Date(d).toLocaleDateString(undefined,range==='day'?{weekday:'short'}:{weekday:'short',day:'numeric'}),xx+3,H-6);}}
+  }
+  // left axis: volts
+  ctx.fillStyle='#4cc2ff';
+  for(let g=0;g<=3;g++){const vv=vmin+(vmax-vmin)*g/3,yy=yv(vv);ctx.strokeStyle='rgba(42,54,71,.6)';
+    ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(L+pw,yy);ctx.stroke();ctx.fillText(vv.toFixed(2),2,yy+3);}
+  // right axis: charge %
+  ctx.fillStyle='#36d399';for(const p of[0,50,100]){ctx.fillText(p+'%',L+pw+4,ys(p)+3);}
+  // lines (break the line across gaps > 10 min, so missing periods don't look like data)
+  const gap=range==='live'?30e3:10*60e3;
+  const line=(col,fy,w)=>{ctx.beginPath();ctx.strokeStyle=col;ctx.lineWidth=w;let prev=null;
+    for(const d of data){const xx=x(d.t),yy=fy(d);if(!prev||d.t-prev>gap)ctx.moveTo(xx,yy);else ctx.lineTo(xx,yy);prev=d.t;}ctx.stroke();};
+  line('rgba(54,211,153,.85)',d=>ys(socFromV(d.v)),1.5);
+  line('#4cc2ff',d=>yv(d.v),2);
+  const lo=Math.min(...data.map(d=>d.mn??d.v)),avg=vs.reduce((a,b)=>a+b,0)/vs.length;
+  note.textContent='Lowest '+lo.toFixed(2)+' V · average '+avg.toFixed(2)+' V ('+socFromV(avg)+'%) · charge % is estimated from resting voltage';
+}
+function renderWeek(){
+  const tb=document.querySelector('#week tbody');if(!tb)return;
+  const rows=[];const today=new Date();today.setHours(0,0,0,0);
+  for(let i=0;i<7;i++){
+    const ds=today.getTime()-i*24*3600e3,de=ds+24*3600e3;
+    const pts=history.filter(d=>d.t>=ds&&d.t<de);
+    const label=i===0?'Today':i===1?'Yesterday':new Date(ds).toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'});
+    if(!pts.length){rows.push('<tr><td>'+label+'</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>');continue;}
+    const mn=Math.min(...pts.map(d=>d.mn??d.v)),mx=Math.max(...pts.map(d=>d.mx??d.v));
+    const av=pts.reduce((a,d)=>a+d.v,0)/pts.length,soc=socFromV(av);
+    const col=av>=12.4?'var(--good)':av>=12.0?'var(--warn)':'var(--bad)';
+    rows.push('<tr><td>'+label+'</td><td>'+mn.toFixed(2)+'</td><td style="color:'+col+'">'+av.toFixed(2)+'</td><td>'+mx.toFixed(2)+'</td><td>'+soc+'%</td></tr>');
+  }
+  tb.innerHTML=rows.join('');
 }
 
 /* ---------- misc ---------- */
@@ -276,7 +365,7 @@ function beep(){const now=Date.now();if(now-lastBeep<15000)return;lastBeep=now;
   try{const a=new (window.AudioContext||window.webkitAudioContext)();const o=a.createOscillator(),g=a.createGain();
     o.connect(g);g.connect(a.destination);o.frequency.value=880;g.gain.value=0.1;o.start();setTimeout(()=>{o.stop();a.close();},250);}catch(e){}}
 function exportCsv(){
-  const rows=['timestamp,iso,volts',...history.map(d=>d.t+','+new Date(d.t).toISOString()+','+d.v.toFixed(2))];
+  const rows=['iso_time,avg_volts,min_volts,max_volts,charge_pct',...history.map(d=>new Date(d.t).toISOString()+','+d.v.toFixed(2)+','+(d.mn??d.v).toFixed(2)+','+(d.mx??d.v).toFixed(2)+','+socFromV(d.v))];
   const blob=new Blob([rows.join('\n')],{type:'text/csv'});
   const url=URL.createObjectURL(blob),a=document.createElement('a');
   a.href=url;a.download='battery_history.csv';document.body.appendChild(a);a.click();a.remove();
@@ -287,12 +376,14 @@ function exportCsv(){
 $('connect').onclick=connect;
 $('disconnect').onclick=disconnect;
 $('csv').onclick=exportCsv;
-$('clear').onclick=()=>{if(confirm('Delete all stored readings?')){history=[];live=[];save();draw();$('stats').textContent='No readings stored yet.';}};
-$('range1').onclick=()=>{rangeAll=false;draw();};
-$('rangeAll').onclick=()=>{rangeAll=true;draw();};
+$('clear').onclick=()=>{if(confirm('Delete all stored readings?')){history=[];live=[];save();draw();updateStats();}};
+document.querySelectorAll('#seg button').forEach(b=>b.onclick=()=>{range=b.dataset.r;
+  document.querySelectorAll('#seg button').forEach(x=>x.classList.toggle('on',x===b));draw();});
+window.addEventListener('resize',draw);
 if(!navigator.bluetooth)$('unsupported').classList.remove('hide');
 setInterval(()=>{$('clock').textContent=new Date().toLocaleTimeString();},1000);
-draw();
+window.addEventListener('pagehide',save);
+draw();updateStats();
 </script>
 </body>
 </html>
