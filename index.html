@@ -129,6 +129,10 @@
   <div class="log" id="log"></div>
 </details>
 
+<div class="mini" style="text-align:center;margin:4px 0 10px">
+  Monitor not in the list? Close the Battery Master app first. <a href="#" id="showAll">Show all devices</a> · <a href="#" id="forget">Forget my monitor</a>
+</div>
+
 <div class="foot">
   <button id="connect">Connect</button>
   <button id="disconnect" class="ghost hide">Disconnect</button>
@@ -200,11 +204,18 @@ async function connect(){
   if(!navigator.bluetooth){$('unsupported').classList.remove('hide');return;}
   try{
     setStatus('Requesting device…','wait');
-    // the BT2000 advertises no name and no service UUID, so list every nearby device
-    const dev=await navigator.bluetooth.requestDevice({
-      acceptAllDevices:true,
-      optionalServices:[SVC,SVC_ALT]
-    });
+    // 1) reuse the monitor picked last time, if the browser remembers it
+    let dev=showAll?null:await rememberedDevice();
+    // 2) otherwise ask; the BT2000 advertises service FFF0 and the name "BatteryMaster"
+    if(!dev){
+      dev=await navigator.bluetooth.requestDevice(showAll?
+        {acceptAllDevices:true,optionalServices:[SVC,SVC_ALT]}:
+        {filters:[{services:[SVC]},{name:'BatteryMaster'},{namePrefix:'Battery'}],optionalServices:[SVC,SVC_ALT]});
+    }
+    showAll=false;
+    device=dev;
+    try{localStorage.setItem('bt2000_dev',dev.id)}catch(e){}
+    dev.removeEventListener('gattserverdisconnected',onDisconnect);
     dev.addEventListener('gattserverdisconnected',onDisconnect);
     setStatus('Connecting…','wait');
     gatt=await dev.gatt.connect();
@@ -236,8 +247,38 @@ function errText(e){
   if(typeof e!=='object')return 'code '+e+(e===2?' (no device chosen / not found)':'');
   return (e.name?e.name+': ':'')+(e.message||JSON.stringify(e));
 }
-function onDisconnect(){setStatus('Disconnected','');$('connect').classList.remove('hide');$('disconnect').classList.add('hide');}
-function disconnect(){if(gatt&&gatt.connected)gatt.disconnect();onDisconnect();}
+async function rememberedDevice(){
+  try{
+    const id=localStorage.getItem('bt2000_dev');
+    if(!id||!navigator.bluetooth.getDevices)return null;
+    const list=await navigator.bluetooth.getDevices();
+    return list.find(d=>d.id===id)||null;
+  }catch(e){return null}
+}
+// keep trying to reconnect while the page is open, so history keeps recording
+let device=null,userDisconnected=false,retryTimer=null,showAll=false;
+function onDisconnect(){
+  setStatus('Disconnected','');$('connect').classList.remove('hide');$('disconnect').classList.add('hide');
+  if(!userDisconnected&&device&&!retryTimer){
+    setStatus('Connection lost — retrying…','wait');
+    retryTimer=setInterval(async()=>{
+      try{
+        gatt=await device.gatt.connect();
+        const svc=await gatt.getPrimaryService(SVC);
+        writeCh=await svc.getCharacteristic(WRITE);
+        notifyCh=await svc.getCharacteristic(NOTIFY);
+        await notifyCh.startNotifications();
+        notifyCh.removeEventListener('characteristicvaluechanged',onData);
+        notifyCh.addEventListener('characteristicvaluechanged',onData);
+        clearInterval(retryTimer);retryTimer=null;
+        setStatus('Connected · BatteryMaster','on');
+        $('connect').classList.add('hide');$('disconnect').classList.remove('hide');
+        await doHandshake();
+      }catch(e){/* out of range — try again shortly */}
+    },10000);
+  }
+}
+function disconnect(){userDisconnected=true;clearInterval(retryTimer);retryTimer=null;if(gatt&&gatt.connected)gatt.disconnect();onDisconnect();userDisconnected=false;device=null;}
 
 /* ---------- incoming data ---------- */
 function onData(ev){
@@ -375,6 +416,8 @@ function exportCsv(){
 /* ---------- wire up ---------- */
 $('connect').onclick=connect;
 $('disconnect').onclick=disconnect;
+$('showAll').onclick=e=>{e.preventDefault();showAll=true;connect();};
+$('forget').onclick=e=>{e.preventDefault();try{localStorage.removeItem('bt2000_dev')}catch(_){}device=null;setStatus('Monitor forgotten — tap Connect to pick again','');};
 $('csv').onclick=exportCsv;
 $('clear').onclick=()=>{if(confirm('Delete all stored readings?')){history=[];live=[];save();draw();updateStats();}};
 document.querySelectorAll('#seg button').forEach(b=>b.onclick=()=>{range=b.dataset.r;
