@@ -95,6 +95,7 @@
   <div class="label">History — <span style="color:var(--accent)">voltage</span> &amp; <span style="color:var(--good)">charge %</span></div>
   <div class="seg" id="seg">
     <button data-r="live">Live</button>
+    <button data-r="half">12 h</button>
     <button data-r="day">24 h</button>
     <button data-r="week" class="on">7 days</button>
     <button data-r="month">30 days</button>
@@ -449,7 +450,7 @@ function draw(){
   const W=c.clientWidth,H=c.clientHeight;c.width=W*dpr;c.height=H*dpr;ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
   const now=Date.now();
-  const span={live:null,day:24*3600e3,week:7*24*3600e3,month:30*24*3600e3}[range];
+  const span={live:null,half:12*3600e3,day:24*3600e3,week:7*24*3600e3,month:30*24*3600e3}[range];
   let data,t0,t1;
   if(range==='live'){data=live;t0=data.length?data[0].t:now-60e3;t1=now;}
   else{t1=now;t0=now-span;data=history.filter(d=>d.t>=t0);
@@ -474,6 +475,13 @@ function draw(){
       ctx.strokeStyle='#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
       if(range!=='month'||new Date(d).getDate()%5===1){ctx.fillStyle='#8aa0bd';
         ctx.fillText(new Date(d).toLocaleDateString(undefined,range==='day'?{weekday:'short'}:{weekday:'short',day:'numeric'}),xx+3,H-6);}}
+  }
+  // hour markers for the 12 h view (every 2 h, labelled with the clock time)
+  if(range==='half'){
+    const h0=new Date(t0);h0.setMinutes(0,0,0);
+    for(let d=h0.getTime();d<=t1;d+=3600e3){if(d<t0)continue;const hr=new Date(d).getHours();if(hr%2)continue;const xx=x(d);
+      ctx.strokeStyle=hr===0?'#3b4a60':'#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
+      ctx.fillStyle='#8aa0bd';ctx.fillText(String(hr).padStart(2,'0')+':00',xx+3,H-6);}
   }
   // left axis: volts
   ctx.fillStyle='#4cc2ff';
