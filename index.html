@@ -41,6 +41,12 @@
   .seg{display:flex;gap:4px;background:var(--panel2);border-radius:12px;padding:4px;margin-bottom:10px}
   .seg button{flex:1;min-width:0;background:transparent;color:var(--muted);padding:8px 2px;font-size:13px;border-radius:9px;white-space:nowrap}
   .seg button.on{background:var(--accent);color:#0b0f17}
+  #rangeBox{margin-bottom:10px}
+  #rangeBox.hide{display:none}
+  #rangeSlider{width:100%;margin:10px 0 8px;accent-color:var(--accent);height:28px}
+  .chips{display:flex;gap:4px}
+  .chips button{flex:1;min-width:0;background:var(--panel2);color:var(--muted);padding:6px 0;font-size:12px;border-radius:8px;border:1px solid var(--line)}
+  .chips button.on{color:var(--accent);border-color:var(--accent)}
   table.wk{width:100%;border-collapse:collapse;font-size:13px}
   table.wk th{color:var(--muted);font-weight:500;text-align:right;padding:6px 4px;border-bottom:1px solid var(--line)}
   table.wk th:first-child,table.wk td:first-child{text-align:left}
@@ -95,12 +101,14 @@
   <div class="label">History — <span style="color:var(--accent)">voltage</span> &amp; <span style="color:var(--good)">charge %</span></div>
   <div class="seg" id="seg">
     <button data-r="live">Live</button>
-    <button data-r="h3">3 h</button>
-    <button data-r="h6">6 h</button>
-    <button data-r="half">12 h</button>
-    <button data-r="day">24 h</button>
-    <button data-r="week" class="on">7 d</button>
-    <button data-r="month">30 d</button>
+    <button data-r="hist" class="on">History</button>
+  </div>
+  <div id="rangeBox">
+    <div class="mini">Showing the last <b id="rangeLbl" style="color:var(--txt)">7 d</b> — drag to choose</div>
+    <input type="range" id="rangeSlider" min="0" max="1000" step="1" value="1000" aria-label="Time span">
+    <div class="chips" id="chips">
+      <button data-m="60">1 h</button><button data-m="120">2 h</button><button data-m="180">3 h</button><button data-m="360">6 h</button><button data-m="720">12 h</button><button data-m="1440">24 h</button><button data-m="10080">7 d</button>
+    </div>
   </div>
   <canvas id="chart"></canvas>
   <div class="mini" id="chartNote" style="margin-top:6px"></div>
@@ -203,7 +211,18 @@ const HANDSHAKE=[frame(0x05),frame(0x08,[0x00,0xd1,0x04,0x02,0x1c]),frame(0x09,[
 let gatt=null,writeCh=null,notifyCh=null;
 let history=load();         // per-minute points [{t, v, mn, mx, n}]
 let live=[];                // recent in-memory points for the Live view
-let range='week';
+let range='hist';
+// chosen history span in minutes (15 min … 7 days), slider is logarithmic
+const SPAN_MIN=15,SPAN_MAX=7*24*60;
+let spanMin=(()=>{try{const v=+localStorage.getItem('bt2000_span');return v>=SPAN_MIN&&v<=SPAN_MAX?v:SPAN_MAX}catch(e){return SPAN_MAX}})();
+const sliderToMin=x=>{let m=Math.exp(Math.log(SPAN_MIN)+(Math.log(SPAN_MAX)-Math.log(SPAN_MIN))*x/1000);
+  return m<120?Math.round(m/5)*5:m<2880?Math.round(m/15)*15:Math.round(m/60)*60;};
+const minToSlider=m=>Math.round((Math.log(m)-Math.log(SPAN_MIN))/(Math.log(SPAN_MAX)-Math.log(SPAN_MIN))*1000);
+function fmtSpan(m){
+  if(m<60)return m+' min';
+  if(m<2880){const h=Math.floor(m/60),r=m%60;return h+' h'+(r?' '+r+' min':'');}
+  const d=Math.floor(m/1440),h=Math.round((m%1440)/60);return d+' d'+(h?' '+h+' h':'');
+}
 const KEEP_MS=31*24*3600e3; // keep ~a month of per-minute points (~45k max, ~2 MB)
 let lastBeep=0,lastSave=0;
 
@@ -452,7 +471,7 @@ function draw(){
   const W=c.clientWidth,H=c.clientHeight;c.width=W*dpr;c.height=H*dpr;ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
   const now=Date.now();
-  const span={live:null,h3:3*3600e3,h6:6*3600e3,half:12*3600e3,day:24*3600e3,week:7*24*3600e3,month:30*24*3600e3}[range];
+  const span=range==='live'?null:spanMin*60e3;
   let data,t0,t1;
   if(range==='live'){data=live;t0=data.length?data[0].t:now-60e3;t1=now;}
   else{t1=now;t0=now-span;data=history.filter(d=>d.t>=t0);
@@ -470,22 +489,22 @@ function draw(){
   const yv=v=>T+ph-(v-vmin)/(vmax-vmin||1)*ph;
   const ys=p=>T+ph-p/100*ph;
   ctx.font='10px sans-serif';ctx.lineWidth=1;
-  // day separators + labels for multi-day views
-  if(range==='week'||range==='month'||range==='day'){
-    const d0=new Date(t0);d0.setHours(0,0,0,0);
-    for(let d=d0.getTime();d<=t1;d+=24*3600e3){if(d<t0)continue;const xx=x(d);
-      ctx.strokeStyle='#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
-      if(range!=='month'||new Date(d).getDate()%5===1){ctx.fillStyle='#8aa0bd';
-        ctx.fillText(new Date(d).toLocaleDateString(undefined,range==='day'?{weekday:'short'}:{weekday:'short',day:'numeric'}),xx+3,H-6);}}
-  }
-  // clock-time markers for the short views: 3 h → every 30 min, 6 h → every hour, 12 h → every 2 h
-  const tick={h3:30,h6:60,half:120}[range];
-  if(tick){
-    const m0=new Date(t0);m0.setMinutes(0,0,0);
-    for(let d=m0.getTime();d<=t1;d+=60e3*Math.min(tick,60)){if(d<t0)continue;const dt=new Date(d);
-      const mins=dt.getHours()*60+dt.getMinutes();if(mins%tick)continue;const xx=x(d);
-      ctx.strokeStyle=mins===0?'#3b4a60':'#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
-      ctx.fillStyle='#8aa0bd';ctx.fillText(String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0'),xx+3,H-6);}
+  // time markers adapt to the chosen span: clock times for short spans, days for long ones
+  if(range!=='live'){
+    const spanM=span/60e3;
+    if(spanM>3*1440){
+      const d0=new Date(t0);d0.setHours(0,0,0,0);
+      for(let d=d0.getTime();d<=t1;d+=24*3600e3){if(d<t0)continue;const xx=x(d);
+        ctx.strokeStyle='#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
+        ctx.fillStyle='#8aa0bd';ctx.fillText(new Date(d).toLocaleDateString(undefined,{weekday:'short',day:'numeric'}),xx+3,H-6);}
+    }else{
+      const tick=[5,10,15,30,60,120,180,360,720].find(c=>spanM/c<=6)||1440;
+      const m0=new Date(t0);m0.setMinutes(0,0,0);
+      for(let d=m0.getTime();d<=t1;d+=60e3*Math.min(tick,60)){if(d<t0)continue;const dt=new Date(d);
+        const mins=dt.getHours()*60+dt.getMinutes();if(mins%tick)continue;const xx=x(d);
+        ctx.strokeStyle=mins===0?'#3b4a60':'#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
+        ctx.fillStyle='#8aa0bd';ctx.fillText(mins===0?dt.toLocaleDateString(undefined,{weekday:'short'}):String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0'),xx+3,H-6);}
+    }
   }
   // left axis: volts
   ctx.fillStyle='#4cc2ff';
@@ -600,7 +619,20 @@ $('forget').onclick=e=>{e.preventDefault();try{localStorage.removeItem('bt2000_d
 $('csv').onclick=exportCsv;
 $('clear').onclick=()=>{if(confirm('Delete all stored readings?')){history=[];live=[];save();draw();updateStats();}};
 document.querySelectorAll('#seg button').forEach(b=>b.onclick=()=>{range=b.dataset.r;
-  document.querySelectorAll('#seg button').forEach(x=>x.classList.toggle('on',x===b));draw();});
+  document.querySelectorAll('#seg button').forEach(x=>x.classList.toggle('on',x===b));
+  $('rangeBox').classList.toggle('hide',range==='live');draw();});
+function setSpan(m,fromSlider){
+  spanMin=Math.max(SPAN_MIN,Math.min(SPAN_MAX,m));
+  if(!fromSlider)$('rangeSlider').value=minToSlider(spanMin);
+  $('rangeLbl').textContent=fmtSpan(spanMin);
+  document.querySelectorAll('#chips button').forEach(c=>c.classList.toggle('on',+c.dataset.m===spanMin));
+  try{localStorage.setItem('bt2000_span',String(spanMin))}catch(e){}
+  if(range==='live'){range='hist';document.querySelectorAll('#seg button').forEach(x=>x.classList.toggle('on',x.dataset.r==='hist'));$('rangeBox').classList.remove('hide');}
+  draw();
+}
+$('rangeSlider').addEventListener('input',e=>setSpan(sliderToMin(+e.target.value),true));
+document.querySelectorAll('#chips button').forEach(c=>c.onclick=()=>setSpan(+c.dataset.m,false));
+setSpan(spanMin,false);
 window.addEventListener('resize',draw);
 if(!navigator.bluetooth)$('unsupported').classList.remove('hide');
 setInterval(()=>{$('clock').textContent=new Date().toLocaleTimeString();},1000);
