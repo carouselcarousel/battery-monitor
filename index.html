@@ -39,7 +39,7 @@
   .metric .v{font-size:22px;font-weight:700;margin-top:3px}
   canvas{width:100%;height:200px;display:block}
   .seg{display:flex;gap:4px;background:var(--panel2);border-radius:12px;padding:4px;margin-bottom:10px}
-  .seg button{flex:1;background:transparent;color:var(--muted);padding:8px 4px;font-size:13px;border-radius:9px}
+  .seg button{flex:1;min-width:0;background:transparent;color:var(--muted);padding:8px 2px;font-size:13px;border-radius:9px;white-space:nowrap}
   .seg button.on{background:var(--accent);color:#0b0f17}
   table.wk{width:100%;border-collapse:collapse;font-size:13px}
   table.wk th{color:var(--muted);font-weight:500;text-align:right;padding:6px 4px;border-bottom:1px solid var(--line)}
@@ -95,10 +95,12 @@
   <div class="label">History — <span style="color:var(--accent)">voltage</span> &amp; <span style="color:var(--good)">charge %</span></div>
   <div class="seg" id="seg">
     <button data-r="live">Live</button>
+    <button data-r="h3">3 h</button>
+    <button data-r="h6">6 h</button>
     <button data-r="half">12 h</button>
     <button data-r="day">24 h</button>
-    <button data-r="week" class="on">7 days</button>
-    <button data-r="month">30 days</button>
+    <button data-r="week" class="on">7 d</button>
+    <button data-r="month">30 d</button>
   </div>
   <canvas id="chart"></canvas>
   <div class="mini" id="chartNote" style="margin-top:6px"></div>
@@ -450,7 +452,7 @@ function draw(){
   const W=c.clientWidth,H=c.clientHeight;c.width=W*dpr;c.height=H*dpr;ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
   const now=Date.now();
-  const span={live:null,half:12*3600e3,day:24*3600e3,week:7*24*3600e3,month:30*24*3600e3}[range];
+  const span={live:null,h3:3*3600e3,h6:6*3600e3,half:12*3600e3,day:24*3600e3,week:7*24*3600e3,month:30*24*3600e3}[range];
   let data,t0,t1;
   if(range==='live'){data=live;t0=data.length?data[0].t:now-60e3;t1=now;}
   else{t1=now;t0=now-span;data=history.filter(d=>d.t>=t0);
@@ -476,12 +478,14 @@ function draw(){
       if(range!=='month'||new Date(d).getDate()%5===1){ctx.fillStyle='#8aa0bd';
         ctx.fillText(new Date(d).toLocaleDateString(undefined,range==='day'?{weekday:'short'}:{weekday:'short',day:'numeric'}),xx+3,H-6);}}
   }
-  // hour markers for the 12 h view (every 2 h, labelled with the clock time)
-  if(range==='half'){
-    const h0=new Date(t0);h0.setMinutes(0,0,0);
-    for(let d=h0.getTime();d<=t1;d+=3600e3){if(d<t0)continue;const hr=new Date(d).getHours();if(hr%2)continue;const xx=x(d);
-      ctx.strokeStyle=hr===0?'#3b4a60':'#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
-      ctx.fillStyle='#8aa0bd';ctx.fillText(String(hr).padStart(2,'0')+':00',xx+3,H-6);}
+  // clock-time markers for the short views: 3 h → every 30 min, 6 h → every hour, 12 h → every 2 h
+  const tick={h3:30,h6:60,half:120}[range];
+  if(tick){
+    const m0=new Date(t0);m0.setMinutes(0,0,0);
+    for(let d=m0.getTime();d<=t1;d+=60e3*Math.min(tick,60)){if(d<t0)continue;const dt=new Date(d);
+      const mins=dt.getHours()*60+dt.getMinutes();if(mins%tick)continue;const xx=x(d);
+      ctx.strokeStyle=mins===0?'#3b4a60':'#2a3647';ctx.beginPath();ctx.moveTo(xx,T);ctx.lineTo(xx,T+ph);ctx.stroke();
+      ctx.fillStyle='#8aa0bd';ctx.fillText(String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0'),xx+3,H-6);}
   }
   // left axis: volts
   ctx.fillStyle='#4cc2ff';
